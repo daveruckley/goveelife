@@ -38,8 +38,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     try:
         entry_data = hass.data[DOMAIN][entry.entry_id]
         api_devices = entry_data[CONF_DEVICES]
+        coordinators = entry_data[CONF_COORDINATORS]
     except Exception as e:
-        _LOGGER.error("%s - async_setup_entry %s: Failed to get cloud devices from data store: %s (%s.%s)", entry.entry_id, PLATFORM, str(e), e.__class__.__module__, type(e).__name__)
+        _LOGGER.error("%s - async_setup_entry %s: Failed to get cloud devices from data store: %s (%s.%s)",
+                      entry.entry_id, PLATFORM, str(e), e.__class__.__module__, type(e).__name__)
         return
 
     for device_cfg in api_devices:
@@ -47,16 +49,37 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             if device_cfg.get('type') not in PLATFORM_DEVICE_TYPES:
                 continue
             device = device_cfg.get('device')
-            coordinator = entry_data[CONF_COORDINATORS][device]
+            coordinator = coordinators.get(device)
+
+            if coordinator is None:
+                _LOGGER.warning("%s - %s: Coordinator not found for device %s", entry.entry_id, PLATFORM, device)
+                continue
+
+            # Force initial refresh so entity becomes available
+            await coordinator.async_refresh()
+
             entity = GoveeLifeClimate(hass, entry, coordinator, device_cfg, platform=PLATFORM)
             entities.append(entity)
             await asyncio.sleep(0)
         except Exception as e:
-            _LOGGER.error("%s - async_setup_entry %s: Failed to setup device: %s (%s.%s)", entry.entry_id, PLATFORM, str(e), e.__class__.__module__, type(e).__name__)
-            return
+            _LOGGER.error("%s - async_setup_entry %s: Failed to setup device: %s (%s.%s)",
+                          entry.entry_id, PLATFORM, str(e), e.__class__.__module__, type(e).__name__)
+            continue
 
     if entities:
         async_add_entities(entities)
+
+        # Optional: Auto-poll coordinator every 10 seconds to keep devices available
+        async def periodic_coordinator_refresh():
+            while True:
+                try:
+                    for entity in entities:
+                        await entity.coordinator.async_refresh()
+                except Exception as e:
+                    _LOGGER.warning("Periodic coordinator refresh failed: %s", e)
+                await asyncio.sleep(10)
+
+        hass.loop.create_task(periodic_coordinator_refresh())
 
 
 class GoveeLifeClimate(ClimateEntity, GoveeLifePlatformEntity):
@@ -156,6 +179,7 @@ class GoveeLifeClimate(ClimateEntity, GoveeLifePlatformEntity):
     def hvac_mode(self) -> str:
         """Return the hvac_mode of the entity."""
         value = GoveeAPI_GetCachedStateValue(self.hass, self._entry_id, self._device_cfg.get('device'), 'devices.capabilities.on_off', 'powerSwitch')
+        _LOGGER.debug("%s - %s: Cached on_off value: %s", self._api_id, self._identifier, value)
         v = self._attr_hvac_modes_mapping.get(value, STATE_UNKNOWN)
         if v == STATE_UNKNOWN:
             _LOGGER.warning("%s - %s: hvac_mode: invalid value: %s", self._api_id, self._identifier, value)
@@ -183,6 +207,7 @@ class GoveeLifeClimate(ClimateEntity, GoveeLifePlatformEntity):
     def preset_mode(self) -> str | None:
         """Return the preset_mode of the entity."""
         value = GoveeAPI_GetCachedStateValue(self.hass, self._entry_id, self._device_cfg.get('device'), 'devices.capabilities.work_mode', 'workMode')
+        _LOGGER.debug("%s - %s: Cached work_mode value: %s", self._api_id, self._identifier, value)
         if not value:
             return None
         work_mode = value.get("workMode")
